@@ -432,6 +432,10 @@ class Table:
         self.cur.execute(""" drop table if exists bulk_insert_temp_table """)
         # precompute all the necessary columns
         parse_results = [self._parse_row(r, add_missing_columns=add_missing_columns, add_column_types=add_column_types, ignore_extra_data=ignore_extra_data) for r in rows]
+
+        if len(parse_results) == 0:
+            return 0  # otherwise syntax error with no columns
+
         all_operation_columns: set[str] = set()
         for operation_cols, _ in parse_results:
             for c in operation_cols:

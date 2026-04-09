@@ -425,13 +425,13 @@ class Table:
         """ See `insert`. `upsert` argument is just to absorb accidentally including this argument, always passed as `True` to `insert`. """
         return self.insert(row, upsert=True, **kwargs)
 
-    def bulk_insert(self, rows: Iterable[RowType], *, upsert=False, add_missing_columns=False, **kwargs):
+    def bulk_insert(self, rows: Iterable[RowType], *, add_missing_columns=False, add_column_types=True, ignore_extra_data=False, upsert=False):
         """ Translating from Python data to the database is slow. This method uses a temporary table to do that part, before performing the transfer to the target table inside of SQLite which is much faster, reducing time spent with the database locked.
 
         NOTE: It is possible specify different sets of columns for the rows. However, if one row specifies one or more columns that a second row does *not* specify, and the second row results in an upsert, then the missing values in the second row *will be updated to null instead of being ignored*. (Presumably, most of the time, all rows will have the same set of columns and this won't be an issue.) """
         self.cur.execute(""" drop table if exists bulk_insert_temp_table """)
         # precompute all the necessary columns
-        parse_results = [self._parse_row(r, add_missing_columns=add_missing_columns, **kwargs) for r in rows]
+        parse_results = [self._parse_row(r, add_missing_columns=add_missing_columns, add_column_types=add_column_types, ignore_extra_data=ignore_extra_data) for r in rows]
         all_operation_columns: set[str] = set()
         for operation_cols, _ in parse_results:
             for c in operation_cols:

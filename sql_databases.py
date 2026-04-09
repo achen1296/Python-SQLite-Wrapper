@@ -355,6 +355,8 @@ class Table:
                         self.cur.execute(f""" alter table "{self.name}" add column {col_str((c, t))} """)
                     else:
                         self.cur.execute(f""" alter table "{self.name}" add column {col_str(c)} """)
+        if added_any:
+            self.altered_table = True
         return added_any
 
     @property
@@ -400,7 +402,7 @@ class Table:
             params = list(row[:lc])
         return operation_cols, params
 
-    def insert(self, row: RowType, *, add_missing_columns: bool = False, add_column_types=True, ignore_extra_data=False, upsert=False):
+    def insert(self, row: RowType, *, add_missing_columns=False, add_column_types=True, ignore_extra_data=False, upsert=False):
         """ If `add_missing_columns`, will add keys of a `row` that is a `Mapping` as new columns if one with the same name doesn't exist (SQLite columns are case-insensitive), and if `add_column_types`, will add declared column types using `type(v).__name__`. Else, if `ignore_extra_data`, ignores the additional keys, otherwise raise an exception.
 
         If `row` is a `Sequence` with length at most the number of columns, always succeeds. Otherwise, either ignores or raises an exception based on `ignore_extra_data`. Cannot add new columns this way because a name is not provided.
@@ -408,6 +410,9 @@ class Table:
         Note: `sqlite3.Row` is treated as a `Mapping`, not a `Sequence`. It is designed such that it could be treated as either in many ways. """
 
         operation_cols, params = self._parse_row(row, add_missing_columns=add_missing_columns, add_column_types=add_column_types, ignore_extra_data=ignore_extra_data)
+        self._insert(operation_cols, params, upsert=upsert)
+
+    def _insert(self, operation_cols: Iterable[str], params: list, *, upsert: bool):
         sql = f""" insert into {self.name} ({cols_joined_str(operation_cols)}) values({",".join("?"*len(params))}) """
         if upsert:
             sql += f""" on conflict do update set ({cols_joined_str(operation_cols)}) = ({",".join("?"*len(params))}) """
@@ -420,19 +425,58 @@ class Table:
         """ See `insert`. `upsert` argument is just to absorb accidentally including this argument, always passed as `True` to `insert`. """
         return self.insert(row, upsert=True, **kwargs)
 
-    def import_csv(self, csv_file: Path | str, *, add_missing_columns: bool = False, ignore_extra_data=False, upsert=False):
-        """ Cannot add types to columns this way, as CSV reader would of course always produce string values. Returns count of entries added. """
-        with self.con:
-            self.cur.execute(""" drop table if exists csv_temp_table """)
+    def bulk_insert(self, rows: Iterable[RowType], *, upsert=False, add_missing_columns=False, **kwargs):
+        """ Translating from Python data to the database is slow. This method uses a temporary table to do that part, before performing the transfer to the target table inside of SQLite which is much faster, reducing time spent with the database locked.
 
-            count = 0
-            with open(csv_file, newline="", encoding="utf-8-sig") as f:  # encoding handles byte order mark
-                reader = csv.DictReader(f)
-                for row in reader:
-                    self.insert(row, add_missing_columns=add_missing_columns, ignore_extra_data=ignore_extra_data, upsert=upsert, add_column_types=False)
-                    count += 1
+        NOTE: It is possible specify different sets of columns for the rows. However, if one row specifies one or more columns that a second row does *not* specify, and the second row results in an upsert, then the missing values in the second row *will be updated to null instead of being ignored*. (Presumably, most of the time, all rows will have the same set of columns and this won't be an issue.) """
+        self.cur.execute(""" drop table if exists bulk_insert_temp_table """)
+        # precompute all the necessary columns
+        parse_results = [self._parse_row(r, add_missing_columns=add_missing_columns, **kwargs) for r in rows]
+        all_operation_columns: set[str] = set()
+        for operation_cols, _ in parse_results:
+            for c in operation_cols:
+                all_operation_columns.add(c)
+
+        self.cur.execute(f""" create temp table bulk_insert_temp_table({cols_joined_str(all_operation_columns)}) """)
+        temp_table = Table(self.db, "bulk_insert_temp_table")
+
+        count = 0
+        for operation_cols, params in parse_results:
+            # upsert is not applicable with no primary key/uniqueness constraints on the temp table, and it will be applied later
+            temp_table._insert(operation_cols, params, upsert=False)
+            count += 1
+
+        operation_cols_str = cols_joined_str(all_operation_columns)
+
+        sql = f"""\
+        insert into {self.name}
+        ({operation_cols_str})
+
+        select {operation_cols_str}
+        from {temp_table.name}
+        """
+
+        if upsert:
+            sql += f"""
+            where true
+
+            on conflict do update
+            set ({operation_cols_str}) = ({",".join("excluded.\"" + c + "\"" for c in temp_table.columns)})
+            """
+
+        with self.con:
+            self.cur.execute(sql)
 
         return count
+
+    def bulk_upsert(self, rows: Iterable[RowType], *, upsert=True, **kwargs):
+        return self.bulk_insert(rows, upsert=True, **kwargs)
+
+    def import_csv(self, csv_file: Path | str, *, add_missing_columns: bool = False, ignore_extra_data=False, upsert=False):
+        """ Cannot add types to columns this way, as CSV reader would of course always produce string values. Returns count of entries added. """
+        with open(csv_file, newline="", encoding="utf-8-sig") as f:  # encoding handles byte order mark
+            reader = csv.DictReader(f)
+            return self.bulk_insert(reader, add_missing_columns=add_missing_columns, ignore_extra_data=ignore_extra_data, upsert=upsert, add_column_types=False)
 
     def update(self, row: RowType, where: str, where_params=[], *, add_missing_columns: bool = False, add_column_types=True, ignore_extra_data=False):
         """ See `insert`. """
@@ -519,15 +563,18 @@ if __name__ == "__main__":
 
     with open("test.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["a", "c"])
-        w.writerow([9, '["hello", "world"]'])
+        w.writerow(["a", "c", "d"])
+        w.writerow([9, '["hello", "world"]', "hello"])
         w.writerow([7, '["bye", "world"]'])
-    t.import_csv("test.csv", upsert=True)
+    t.import_csv("test.csv", upsert=True, add_missing_columns=True)
     os.remove("test.csv")
 
     selected = [dict(**r) for r in t.select(where="a=9", as_types={"c": "list"})]
-    assert selected == [{"a": 9, "b": None, "c": ["hello", "world"]}], selected
+    assert selected == [{"a": 9, "b": None, "c": ["hello", "world"], "d": "hello"}], selected
     selected = [dict(**r) for r in t.select(where="a=7", as_types={"c": "list"})]
-    assert selected == [{"a": 7, "b": '["asdf"]', "c": ["bye", "world"]}], selected
+    # column b should be retained through upsert
+    assert selected == [{"a": 7, "b": '["asdf"]', "c": ["bye", "world"], "d": None}], selected
 
     test_db.con.close()
+
+    print("tests passed")

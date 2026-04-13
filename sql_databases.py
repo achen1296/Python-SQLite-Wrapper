@@ -200,9 +200,9 @@ def fetch_rows(db: "Database | Table | sqlite3.Connection", sql: str, parameters
 
 
 class Database:
-    def __init__(self, db_file: str | Path, timeout=60.):
+    def __init__(self, db_file: str | Path, *, timeout=60., autocommit=False):
         self.db_file = Path(db_file)
-        self.con = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, timeout=timeout)
+        self.con = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, timeout=timeout, autocommit=autocommit)
         _add_connection_features(self.con)
         self.cur = self.con.cursor()
 
@@ -490,7 +490,7 @@ class Table:
         with self.con:
             self.cur.execute(sql, params)
 
-    def select(self, columns: Iterable[str] | None = None, where: str = "true", where_params=[], *, as_types: Mapping[str, str] = {}) -> list[sqlite3.Row]:
+    def select(self, columns: Iterable[str] | None = None, where: str = "true", where_params=[], *, as_types: Mapping[str, str] = {}) -> list[Row]:
         """ Don't forget to `sqlite3.register_converter` if you use `as_types`! Some converters have already been registered for common Python built-in types. """
         if columns is None:
             columns = self.columns

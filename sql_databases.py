@@ -184,7 +184,7 @@ class Row(sqlite3.Row):
 
 def _add_connection_features(con: sqlite3.Connection):
     con.row_factory = Row
-    con.create_function("regexp", 2, lambda p, s: bool(re.search(p, s, re.I)), deterministic=True)
+    con.create_function("regexp", 2, lambda p, s: bool(re.search(p, s or "", re.I)), deterministic=True)
 
 
 def fetch_rows(db: "Database | Table | sqlite3.Connection", sql: str, parameters=()):

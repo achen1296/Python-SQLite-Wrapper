@@ -192,7 +192,6 @@ class Database:
         self.db_file = Path(db_file)
         self.con = sqlite3.connect(self.db_file, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, timeout=timeout, autocommit=autocommit)
         _add_connection_features(self.con)
-        self.cur = self.con.cursor()
 
     def close(self):
         """ This might be needed for long-running programs. """
@@ -257,7 +256,6 @@ class Table:
     def __init__(self, db: Database, name: str):
         self.db = db
         self.con = db.con
-        self.cur = db.con.cursor()
         self.name = name
 
         self.altered_table = True

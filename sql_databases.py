@@ -219,13 +219,13 @@ class Database:
     @property
     def tables(self) -> list[str]:
         with self.con:
-            return [name[0].lower() for name in self.cur.execute(""" select name from sqlite_schema where type = 'table' """).fetchall()]
+            return [name[0].lower() for name in self.con.execute(""" select name from sqlite_schema where type = 'table' """).fetchall()]
 
     def create_table(self, name: str, columns: Mapping[str, str] | Iterable[str | tuple[str, str]], primary_keys: Iterable[str]):
         cs = cols_joined_str(columns)
         primary_keys_str = cols_joined_str(primary_keys)
         with self.con:
-            self.cur.execute(f""" create table \"{name}\" ( {cs}, primary key ({primary_keys_str}) ) """)
+            self.con.execute(f""" create table \"{name}\" ( {cs}, primary key ({primary_keys_str}) ) """)
         return self.table(name)
 
     @cache
@@ -233,7 +233,7 @@ class Database:
         return Table(self, name)
 
     def create_sql(self) -> list[str]:
-        return [r[0] for r in self.cur.execute(f""" select sql from sqlite_schema where sql is not null """).fetchall()]
+        return [r[0] for r in self.con.execute(f""" select sql from sqlite_schema where sql is not null """).fetchall()]
 
     def synchronize_definition_file(self, db_definition_file: Path | str):
         # the database file is not expected to be reconstructed often if at all, this code is mostly to document the intent of matching the saved table definitions in git
@@ -247,7 +247,7 @@ class Database:
                         # otherwise could be e.g. a trigger or index
                         t = m.group(1)
                         if t not in tables:
-                            self.cur.execute(line)
+                            self.con.execute(line)
         with open(db_definition_file, "w") as f:
             for sql in self.create_sql():
                 print(sql, file=f)
@@ -280,7 +280,7 @@ class Table:
     def _cache_columns_and_types(self):
         if self.altered_table:
             with self.con:
-                cols_and_types = self.cur.execute(""" select name, type, hidden from pragma_table_xinfo(?) """, (self.name, )).fetchall()
+                cols_and_types = self.con.execute(""" select name, type, hidden from pragma_table_xinfo(?) """, (self.name, )).fetchall()
             if not cols_and_types:
                 raise TableNotFound(self.name)
             # hidden == 0 are ordinary columns
@@ -352,9 +352,9 @@ class Table:
                 added_any = True
                 with self.con:
                     if t:
-                        self.cur.execute(f""" alter table "{self.name}" add column {col_str((c, t))} """)
+                        self.con.execute(f""" alter table "{self.name}" add column {col_str((c, t))} """)
                     else:
-                        self.cur.execute(f""" alter table "{self.name}" add column {col_str(c)} """)
+                        self.con.execute(f""" alter table "{self.name}" add column {col_str(c)} """)
         if added_any:
             self.altered_table = True
         return added_any
@@ -363,7 +363,7 @@ class Table:
     @cache  # primary keys cannot be changed except by recreating the table
     def primary_keys(self) -> tuple[str]:
         with self.con:
-            cols = tuple(name[0].lower() for name in self.cur.execute(""" select name from pragma_table_info(?) where pk > 0 """, (self.name, )).fetchall())
+            cols = tuple(name[0].lower() for name in self.con.execute(""" select name from pragma_table_info(?) where pk > 0 """, (self.name, )).fetchall())
         if not cols:
             raise TableNotFound(self.name)
         return cols
@@ -419,7 +419,7 @@ class Table:
             params = params + params
 
         with self.con:
-            self.cur.execute(sql, params)
+            self.con.execute(sql, params)
 
     def upsert(self, row: RowType, *, upsert=True, **kwargs,):
         """ See `insert`. `upsert` argument is just to absorb accidentally including this argument, always passed as `True` to `insert`. """
@@ -429,7 +429,7 @@ class Table:
         """ Translating from Python data to the database is slow. This method uses a temporary table to do that part, before performing the transfer to the target table inside of SQLite which is much faster, reducing time spent with the database locked.
 
         NOTE: It is possible specify different sets of columns for the rows. However, if one row specifies one or more columns that a second row does *not* specify, and the second row results in an upsert, then the missing values in the second row *will be updated to null instead of being ignored*. (Presumably, most of the time, all rows will have the same set of columns and this won't be an issue.) """
-        self.cur.execute(""" drop table if exists bulk_insert_temp_table """)
+        self.con.execute(""" drop table if exists bulk_insert_temp_table """)
         # precompute all the necessary columns
         parse_results = [self._parse_row(r, add_missing_columns=add_missing_columns, add_column_types=add_column_types, ignore_extra_data=ignore_extra_data) for r in rows]
 
@@ -441,7 +441,7 @@ class Table:
             for c in operation_cols:
                 all_operation_columns.add(c)
 
-        self.cur.execute(f""" create temp table bulk_insert_temp_table({cols_joined_str(all_operation_columns)}) """)
+        self.con.execute(f""" create temp table bulk_insert_temp_table({cols_joined_str(all_operation_columns)}) """)
         temp_table = Table(self.db, "bulk_insert_temp_table")
 
         count = 0
@@ -469,7 +469,7 @@ class Table:
             """
 
         with self.con:
-            self.cur.execute(sql)
+            self.con.execute(sql)
 
         return count
 
@@ -488,7 +488,7 @@ class Table:
         sql = f""" update {self.name} set ({cols_joined_str(operation_cols)}) = ({",".join("?"*len(params))}) where {where} """
         params += where_params
         with self.con:
-            self.cur.execute(sql, params)
+            self.con.execute(sql, params)
 
     def select(self, columns: Iterable[str] | None = None, where: str = "true", where_params=[], *, as_types: Mapping[str, str] = {}) -> list[Row]:
         """ Don't forget to `sqlite3.register_converter` if you use `as_types`! Some converters have already been registered for common Python built-in types. """
@@ -504,12 +504,12 @@ class Table:
 
         with self.con:
             sql = f""" select {col_str} from {self.name} where {where} """
-            return self.cur.execute(sql, where_params).fetchall()
+            return self.con.execute(sql, where_params).fetchall()
 
     def delete(self, where: str = "true", where_params=[], ):
         with self.con:
             sql = f""" delete from "{self.name}" where {where} """
-            self.cur.execute(sql, where_params)
+            self.con.execute(sql, where_params)
 
     def __iter__(self):
         return iter(self.select())
